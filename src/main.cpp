@@ -11,6 +11,8 @@
 #include <rclc/executor.h>
 #include <sensor_msgs/msg/imu.h>
 #include <std_msgs/msg/int32.h>
+#include <nav_msgs/msg/odometry.h>
+
 
 // --- PIN DEFINITIONS ---
 #define I2C_SDA 8
@@ -27,6 +29,19 @@
 
 #define ENC_RR_A 17
 #define ENC_RR_B 18
+
+const float METERS_PER_TICK = 0.0008899; 
+const float WHEEL_BASE_WIDTH = 0.20;
+
+// Robot State
+float odom_x = 0.0;
+float odom_y = 0.0;
+float odom_theta = 0.0;
+long prev_fl = 0, prev_fr = 0, prev_rl = 0, prev_rr = 0;
+
+// ROS Objects
+rcl_publisher_t pub_odom;
+nav_msgs__msg__Odometry msg_odom;
 
 // --- HARDWARE OBJECTS ---
 Adafruit_MPU6050 mpu;
@@ -67,33 +82,40 @@ void error_loop() {
 
 // --- MAIN LOOP CALLBACK ---
 void timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
-  RCLC_UNUSED(last_call_time);
-  if (timer != NULL) {
-    
-    // 1. Read and Publish Encoders
-    msg_enc_fl.data = (int32_t)enc_fl.getCount();
-    msg_enc_fr.data = (int32_t)enc_fr.getCount();
-    msg_enc_rl.data = (int32_t)enc_rl.getCount();
-    msg_enc_rr.data = (int32_t)enc_rr.getCount();
+  if (timer == NULL) return;
 
-    RCSOFTCHECK(rcl_publish(&pub_enc_fl, &msg_enc_fl, NULL));
-    RCSOFTCHECK(rcl_publish(&pub_enc_fr, &msg_enc_fr, NULL));
-    RCSOFTCHECK(rcl_publish(&pub_enc_rl, &msg_enc_rl, NULL));
-    RCSOFTCHECK(rcl_publish(&pub_enc_rr, &msg_enc_rr, NULL));
+  // 1. Get current counts
+  long curr_fl = enc_fl.getCount();
+  long curr_fr = enc_fr.getCount();
+  long curr_rl = enc_rl.getCount();
+  long curr_rr = enc_rr.getCount();
 
-    // 2. Read and Publish IMU
-    sensors_event_t a, g, temp;
-    mpu.getEvent(&a, &g, &temp);
+  // 2. Calculate distance traveled by each side (averaging front/rear)
+  float d_left = ((curr_fl - prev_fl) + (curr_rl - prev_rl)) / 2.0 * METERS_PER_TICK;
+  float d_right = ((curr_fr - prev_fr) + (curr_rr - prev_rr)) / 2.0 * METERS_PER_TICK;
 
-    msg_imu.linear_acceleration.x = a.acceleration.x;
-    msg_imu.linear_acceleration.y = a.acceleration.y;
-    msg_imu.linear_acceleration.z = a.acceleration.z;
-    msg_imu.angular_velocity.x = g.gyro.x;
-    msg_imu.angular_velocity.y = g.gyro.y;
-    msg_imu.angular_velocity.z = g.gyro.z;
+  // 3. Update previous counts for next loop
+  prev_fl = curr_fl; prev_fr = curr_fr; prev_rl = curr_rl; prev_rr = curr_rr;
 
-    RCSOFTCHECK(rcl_publish(&pub_imu, &msg_imu, NULL));
-  }
+  // 4. Differential Kinematics
+  float d_distance = (d_right + d_left) / 2.0;
+  float d_theta = (d_right - d_left) / WHEEL_BASE_WIDTH;
+
+  // 5. Update Pose
+  odom_x += d_distance * cos(odom_theta);
+  odom_y += d_distance * sin(odom_theta);
+  odom_theta += d_theta;
+
+  // 6. Fill Odometry Message
+  msg_odom.header.stamp.nanosec = rmw_uros_epoch_nanos(); // If using sync'd clock
+  msg_odom.pose.pose.position.x = odom_x;
+  msg_odom.pose.pose.position.y = odom_y;
+  
+  // Convert Euler theta to Quaternion (standard for ROS2)
+  msg_odom.pose.pose.orientation.z = sin(odom_theta / 2.0);
+  msg_odom.pose.pose.orientation.w = cos(odom_theta / 2.0);
+
+  RCSOFTCHECK(rcl_publish(&pub_odom, &msg_odom, NULL));
 }
 
 void setup() {
@@ -141,6 +163,7 @@ void setup() {
   RCCHECK(rclc_publisher_init_default(&pub_enc_fr, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "encoder/front_right"));
   RCCHECK(rclc_publisher_init_default(&pub_enc_rl, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "encoder/rear_left"));
   RCCHECK(rclc_publisher_init_default(&pub_enc_rr, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "encoder/rear_right"));
+  RCCHECK(rclc_publisher_init_default(&pub_odom, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(nav_msgs, msg, Odometry), "odom"));
   msg_imu.orientation_covariance[0] = -1.0;
 
   // 6. Setup Timer & Executor (50Hz = 20ms timeout)
