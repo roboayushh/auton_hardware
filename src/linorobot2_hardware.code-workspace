@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../../../final/linorobot2_hardware"
+		},
+		{
+			"name": "microros",
+			"path": "../../microros"
+		},
+		{
+			"name": "auton",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
